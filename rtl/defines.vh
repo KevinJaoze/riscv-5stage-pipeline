@@ -5,39 +5,68 @@
 
 `define PC_INIT_VAL 32'h0
 
+// alu_op
 `define ALU_ADD     5'h00
+`define ALU_SUB     5'h01
+`define ALU_XOR     5'h02
 `define ALU_OR      5'h03
+`define ALU_AND     5'h04
 `define ALU_SLL     5'h05
+`define ALU_SRL     5'h06
+`define ALU_SRA     5'h07
 `define ALU_EQ      5'h08
 `define ALU_NE      5'h09
-    
+`define ALU_SLT     5'h0a
+`define ALU_SLTU    5'h0b
+`define ALU_BGE     5'h0c
+`define ALU_BGEU    5'h0d
+`define ALU_MUL     5'h0e
+`define ALU_MULH    5'h0f
+`define ALU_MULHU   5'h10
+`define ALU_DIV     5'h11
+`define ALU_DIVU    5'h12
+`define ALU_REM     5'h13
+`define ALU_REMU    5'h14
+`define ALU_N       5'h1f
+
+// npc_op
 `define NPC_PC4     2'b00
+`define NPC_JALR    2'b01
 `define NPC_BRA     2'b10
 `define NPC_JMP     2'b11
-    
+
+// sext_op
+`define EXT_R       3'b110
 `define EXT_I       3'b000
+`define EXT_S       3'b001
 `define EXT_B       3'b010
 `define EXT_U       3'b011
 `define EXT_J       3'b100
+`define EXT_SHAMT   3'b101
 
+// rf_wsel
 `define WB_ALU      2'b00
 `define WB_RAM      2'b01
 `define WB_PC4      2'b10
 `define WB_EXT      2'b11
 
+// alua_sel
 `define ALU_A_RS1   1'b0
 `define ALU_A_PC    1'b1
-    
+
+// alub_sel
 `define ALU_B_RS2   1'b0
 `define ALU_B_EXT   1'b1
 
+// ram_rop
 `define RAM_EXT_N   3'b000
 `define RAM_EXT_W   3'b001
 `define RAM_EXT_B   3'b010
 `define RAM_EXT_BU  3'b011
 `define RAM_EXT_H   3'b100
 `define RAM_EXT_HU  3'b101
-    
+
+// ram_wop
 `define RAM_WE_N    4'b0000
 `define RAM_WE_B    4'b0001
 `define RAM_WE_H    4'b0011
