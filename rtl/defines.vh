@@ -36,7 +36,6 @@
 `define NPC_JMP     2'b11
 
 // sext_op
-`define EXT_R       3'b110
 `define EXT_I       3'b000
 `define EXT_S       3'b001
 `define EXT_B       3'b010
