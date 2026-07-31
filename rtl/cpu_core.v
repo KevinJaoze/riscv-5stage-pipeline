@@ -190,7 +190,7 @@ module cpu_core(
         .da_addr    (da_addr),
 
         .ram_wop    (ram_wop),
-        .ram_wdata  (32'h0),
+        .ram_wdata  (rf_rd2),   // Store data comes from rs2.
         .da_wen     (da_wen),
         .da_wdata   (da_wdata)
     );
