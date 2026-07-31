@@ -90,6 +90,7 @@ module cpu_core(
         .op         (npc_op),
         .pc         (pc),
         .offset     (ext),
+        .jalr_target(alu_c),    // Dedicated jalr target from ALU.
         .br         (br),
         .npc        (npc),
         .pc4        (pc4)
