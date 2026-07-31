@@ -26,8 +26,15 @@ module ALU (
     always @(*) begin
         case (op_r != 4'h0 ? op_r : op)
             `ALU_ADD  : c = a + b;
+            `ALU_SUB  : c = a - b;
+            `ALU_XOR  : c = a ^ b;
             `ALU_OR   : c = a | b;
+            `ALU_AND  : c = a & b;
             `ALU_SLL  : c = a << b[4:0];
+            `ALU_SRL  : c = a >> b[4:0];
+            `ALU_SRA  : c = $signed(a) >>> b[4:0];
+            `ALU_SLT  : c = ($signed(a) < $signed(b)) ? 32'h1 : 32'h0;
+            `ALU_SLTU : c = (a < b) ? 32'h1 : 32'h0;
             default   : c = 32'h0;
         endcase
     end
@@ -36,6 +43,10 @@ module ALU (
         case (op)
             `ALU_EQ : br = a == b;
             `ALU_NE : br = a != b;
+            `ALU_SLT : br = $signed(a) < $signed(b);   // Reused by blt.
+            `ALU_SLTU: br = a < b;                     // Reused by bltu.
+            `ALU_BGE : br = $signed(a) >= $signed(b);
+            `ALU_BGEU: br = a >= b;
             default : br = 1'b0;
         endcase
     end
