@@ -15,7 +15,8 @@ module ALU (
 );
 
     wire        mul_flag, mulu_flag;
-    wire [63:0] mul_res , mulu_res ;
+    wire [63:0] mul_res;
+    wire [65:0] mulu_res;
     wire        mul_busy, mulu_busy;
     wire        div_flag, divu_flag;
     wire [31:0] div_quo , divu_quo ;    // quotient
@@ -24,7 +25,7 @@ module ALU (
     reg  [ 4:0] op_r;
 
     always @(*) begin
-        case (op_r != 4'h0 ? op_r : op)
+        case (op_r != 5'h0 ? op_r : op)
             `ALU_ADD  : c = a + b;
             `ALU_SUB  : c = a - b;
             `ALU_XOR  : c = a ^ b;
@@ -35,6 +36,9 @@ module ALU (
             `ALU_SRA  : c = $signed(a) >>> b[4:0];
             `ALU_SLT  : c = ($signed(a) < $signed(b)) ? 32'h1 : 32'h0;
             `ALU_SLTU : c = (a < b) ? 32'h1 : 32'h0;
+            `ALU_MUL  : c = mul_res[31:0];
+            `ALU_MULH : c = mul_res[63:32];
+            `ALU_MULHU: c = mulu_res[63:32];
             default   : c = 32'h0;
         endcase
     end
@@ -51,18 +55,19 @@ module ALU (
         endcase
     end
 
-    assign mul_flag  = 1'b0;
-    assign mulu_flag = 1'b0;
+    assign mul_flag  = (op == `ALU_MUL) | (op == `ALU_MULH);
+    assign mulu_flag = (op == `ALU_MULHU);
     assign div_flag  = 1'b0;
     assign divu_flag = 1'b0;
-    // assign busy      = mul_busy | mulu_busy | div_busy | divu_busy;
-    assign busy      = 1'b0;
+    assign busy      = mul_busy | mulu_busy | div_busy | divu_busy;
 
     always @(posedge clk) begin
-        if (mul_flag | mulu_flag | div_flag | divu_flag)
+        if (rst)
+            op_r <= 5'h0;
+        else if (mul_flag | mulu_flag | div_flag | divu_flag)
             op_r <= op;
         else if (!busy)
-            op_r <= 4'h0;
+            op_r <= 5'h0;
     end
 
     multiplier #(32) U_mul (
