@@ -26,6 +26,8 @@ module cpu_core(
     wire [31:0] pc;
     wire [31:0] npc;
     wire [31:0] pc4;
+    wire [31:0] bj_target;
+    wire [31:0] jalr_target;
     wire [31:0] inst;
 
     // Controller
@@ -85,15 +87,17 @@ module cpu_core(
     // 复位信号发生边沿变化时首次取指; 当前指令执行完毕后取下一条指令
     assign ifetch_req  = first_req | inst_finished_r;
     assign ifetch_addr = pc;
+    assign pc4         = pc + 32'h4;
+    assign bj_target   = pc + ext;
+    assign jalr_target = alu_c & ~32'h1;
 
     NPC U_NPC (
         .op         (npc_op),
-        .pc         (pc),
-        .offset     (ext),
-        .jalr_target(alu_c),    // Dedicated jalr target from ALU.
+        .pc4        (pc4),
+        .bj_target  (bj_target),
+        .jalr_target(jalr_target),
         .br         (br),
-        .npc        (npc),
-        .pc4        (pc4)
+        .npc        (npc)
     );
 
     PC U_PC (
