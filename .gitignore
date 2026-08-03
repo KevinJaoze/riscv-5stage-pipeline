@@ -1,0 +1,44 @@
+# Vivado local generated/cache directories
+.Xil/
+.cache/
+.hw/
+.ip_user_files/
+.sim/
+.runs/
+
+# Vivado logs, journals, reports, temporary outputs
+*.jou
+*.log
+*.str
+*.rpt
+*.pb
+*.dmp
+*.wdb
+*.vcd
+*.vpd
+*.saif
+
+# Vivado generated backup/temp files
+*.backup*
+*.bak
+*.tmp
+*.temp
+*~
+*.swp
+*.swo
+
+# Simulation/compiler work directories
+xsim.dir/
+work/
+transcript
+modelsim.ini
+*.wlf
+
+# Editor/IDE local config
+.vscode/
+.idea/
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store
