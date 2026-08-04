@@ -11,7 +11,7 @@ module cpu_core(
     output wire [31:0]  ifetch_addr  /* verilator public */ ,
     input  wire         ifetch_valid /* verilator public */ ,
     input  wire [31:0]  ifetch_inst,
-    
+
     // Data Access Interface
     output reg  [ 3:0]  daccess_ren,
     output reg  [31:0]  daccess_addr,
@@ -22,159 +22,200 @@ module cpu_core(
     input  wire         daccess_wresp
 );
 
-    // IF and next-PC signals.
+    localparam [31:0] NOP_INST = 32'h0000_0013; // addi x0, x0, 0
+
+    // IF stage.
     wire [31:0] pc;
     wire [31:0] npc;
     wire [31:0] pc4;
-    wire [31:0] bj_target;
-    wire [31:0] jalr_target;
-    wire [31:0] inst;
+    reg         rst_r;
+    reg  [31:0] if_pc;
+    reg  [31:0] if_pc4;
 
-    // Decode control outputs. Later commits will pipeline only the fields
-    // used by following stages.
-    wire [ 1:0] npc_op;
-    wire [ 1:0] rf_wsel;
-    wire [ 2:0] sext_op;
-    wire [ 4:0] alu_op;
-    wire        alua_sel;
-    wire        alub_sel;
-    wire [ 2:0] ram_rop;
-    reg  [ 2:0] ram_rop_hold;
-    wire [ 3:0] ram_wop;
-    wire        is_mul;
-    wire        is_div;
-    wire        is_mul_div;
-    reg         mul_div_active;
-
-    // Register file and writeback signals.
-    wire [31:0] rf_rd1;
-    wire [31:0] rf_rd2;
-    wire        rf_we;
-    wire        rf_we_wb;
-    reg  [ 4:0] rd_addr_hold;
-    wire [ 4:0] rf_waddr;
-    reg  [31:0] rf_wdata;
-
-    // Immediate value generated in decode.
-    wire [31:0] ext;
-
-    // Execute-stage datapath signals.
-    wire [31:0] alu_a;
-    wire [31:0] alu_b;
-    wire [31:0] alu_c;
-    reg  [31:0] load_addr_hold;
-    wire        br;
-    wire        mul_div_busy;
-    
-    // Memory-stage request and load extension signals.
-    wire [ 3:0] da_ren;
-    wire [31:0] da_addr;
-    wire [ 3:0] da_wen;
-    wire [31:0] da_wdata;
-    wire [31:0] ram_ext;
-    wire        is_ld_st;
-    reg         ld_st_active;
-    wire        ld_st_done;
-
-    // Single-cycle wait helpers. Pipeline control will replace these later.
-    wire        inst_finished;
-    reg         inst_finished_r;
-
-    // IF stage.
-    reg rst_r;
     wire first_req = rst_r & !cpu_rst;
-    always @(posedge cpu_clk) rst_r <= cpu_rst;
 
-    // Fetch once after reset and after each completed instruction.
-    assign ifetch_req  = first_req | inst_finished_r;
+    always @(posedge cpu_clk) begin
+        rst_r <= cpu_rst;
+    end
+
+    assign ifetch_req  = first_req | ifetch_valid;
     assign ifetch_addr = pc;
     assign pc4         = pc + 32'h4;
-    assign bj_target   = pc + ext;
-    assign jalr_target = alu_c & ~32'h1;
-
-    NPC U_NPC (
-        .op         (npc_op),
-        .pc4        (pc4),
-        .bj_target  (bj_target),
-        .jalr_target(jalr_target),
-        .br         (br),
-        .npc        (npc)
-    );
 
     PC U_PC (
         .clk        (cpu_clk),
         .rst        (cpu_rst),
         .npc        (npc),
-        .fetch      (inst_finished),
+        .fetch      (ifetch_req),
         .pc         (pc)
     );
-    
-    // ID stage. The instruction bus is valid for one cycle only.
-    assign inst = ifetch_valid ? ifetch_inst : 32'h13 /* NOP */ ;
+
+    always @(posedge cpu_clk or posedge cpu_rst) begin
+        if (cpu_rst) begin
+            if_pc  <= 32'h0;
+            if_pc4 <= 32'h0;
+        end else if (ifetch_req) begin
+            if_pc  <= pc;
+            if_pc4 <= pc4;
+        end
+    end
+
+    // IF/ID pipeline register.
+    reg        if_id_valid;
+    reg [31:0] if_id_pc;
+    reg [31:0] if_id_pc4;
+    reg [31:0] if_id_inst;
+
+    always @(posedge cpu_clk or posedge cpu_rst) begin
+        if (cpu_rst) begin
+            if_id_valid <= 1'b0;
+            if_id_pc    <= 32'h0;
+            if_id_pc4   <= 32'h0;
+            if_id_inst  <= NOP_INST;
+        end else begin
+            if_id_valid <= ifetch_valid;
+            if_id_pc    <= if_pc;
+            if_id_pc4   <= if_pc4;
+            if_id_inst  <= ifetch_valid ? ifetch_inst : NOP_INST;
+        end
+    end
+
+    // ID stage.
+    wire [ 1:0] id_npc_op;
+    wire [ 1:0] id_rf_wsel;
+    wire [ 2:0] id_sext_op;
+    wire [ 4:0] id_alu_op;
+    wire        id_alua_sel;
+    wire        id_alub_sel;
+    wire [ 2:0] id_ram_rop;
+    wire [ 3:0] id_ram_wop;
+    wire        id_is_mul;
+    wire        id_is_div;
+    wire        id_rf_we;
+    wire [31:0] id_rf_rd1;
+    wire [31:0] id_rf_rd2;
+    wire [31:0] id_ext;
+
+    // WB-stage signals feed the register file write port.
+    reg [31:0] mem_wb_pc;
+    reg [31:0] mem_wb_pc4;
+    reg [31:0] mem_wb_alu_c;
+    reg [31:0] mem_wb_ram_ext;
+    reg [31:0] mem_wb_lui_imm;
+    reg [ 4:0] mem_wb_rd;
+    reg [ 1:0] mem_wb_rf_wsel;
+    reg        mem_wb_rf_we;
+    reg        mem_wb_valid;
+    reg [31:0] rf_wdata;
 
     Controller U_CU (
-        .opcode         (inst[6:0]),
-        .funct3         (inst[14:12]),
-        .funct7         (inst[31:25]),
-        .npc_op         (npc_op),
-        .sext_op        (sext_op),
-        .alu_op         (alu_op),
-        .alua_sel       (alua_sel),
-        .alub_sel       (alub_sel),
-        .is_mul         (is_mul),
-        .is_div         (is_div),
-        .ram_r_op       (ram_rop),
-        .ram_w_op       (ram_wop),
-        .rf_we          (rf_we),
-        .rf_wsel        (rf_wsel)
+        .opcode         (if_id_inst[6:0]),
+        .funct3         (if_id_inst[14:12]),
+        .funct7         (if_id_inst[31:25]),
+        .npc_op         (id_npc_op),
+        .sext_op        (id_sext_op),
+        .alu_op         (id_alu_op),
+        .alua_sel       (id_alua_sel),
+        .alub_sel       (id_alub_sel),
+        .is_mul         (id_is_mul),
+        .is_div         (id_is_div),
+        .ram_r_op       (id_ram_rop),
+        .ram_w_op       (id_ram_wop),
+        .rf_we          (id_rf_we),
+        .rf_wsel        (id_rf_wsel)
     );
 
     RF U_RF (
         .clk        (cpu_clk),
-        .rR1        (inst[19:15]),
-        .rR2        (inst[24:20]),
-        .rD1        (rf_rd1),
-        .rD2        (rf_rd2),
-        .we         (rf_we_wb),
-        .wR         (rf_waddr),
+        .rR1        (if_id_inst[19:15]),
+        .rR2        (if_id_inst[24:20]),
+        .rD1        (id_rf_rd1),
+        .rD2        (id_rf_rd2),
+        .we         (mem_wb_rf_we & mem_wb_valid),
+        .wR         (mem_wb_rd),
         .wD         (rf_wdata)
     );
 
     SEXT U_SEXT (
-        .op         (sext_op),
-        .imm        (inst[31:7]),
-        .ext        (ext)
+        .op         (id_sext_op),
+        .imm        (if_id_inst[31:7]),
+        .ext        (id_ext)
     );
-    
-    // Loads and stores wait for the external data response.
-    assign is_ld_st = (ram_rop != `RAM_EXT_N) | (ram_wop != `RAM_WE_N);
-    always @(posedge cpu_clk or posedge cpu_rst) begin
-        if      (cpu_rst)    ld_st_active <= 1'b0;
-        else if (is_ld_st)   ld_st_active <= 1'b1;
-        else if (ld_st_done) ld_st_active <= 1'b0;
-    end
 
-    // Mul/div operations wait for the iterative unit to become idle.
-    assign is_mul_div = is_mul | is_div;
-    always @(posedge cpu_clk or posedge cpu_rst) begin
-        if      (cpu_rst)       mul_div_active <= 1'b0;
-        else if (is_mul_div)    mul_div_active <= 1'b1;
-        else if (!mul_div_busy) mul_div_active <= 1'b0;
-    end
+    // ID/EX pipeline register.
+    reg        id_ex_valid;
+    reg [31:0] id_ex_pc;
+    reg [31:0] id_ex_pc4;
+    reg [31:0] id_ex_rs1;
+    reg [31:0] id_ex_rs2;
+    reg [31:0] id_ex_ext;
+    reg [31:0] id_ex_lui_imm;
+    reg [ 4:0] id_ex_rd;
+    reg [ 1:0] id_ex_npc_op;
+    reg [ 1:0] id_ex_rf_wsel;
+    reg [ 4:0] id_ex_alu_op;
+    reg        id_ex_alua_sel;
+    reg        id_ex_alub_sel;
+    reg [ 2:0] id_ex_ram_rop;
+    reg [ 3:0] id_ex_ram_wop;
+    reg        id_ex_rf_we;
 
-    // Multi-cycle paths hold the destination register until writeback.
-    always @(posedge cpu_clk) begin
-        if (is_ld_st | is_mul_div) rd_addr_hold <= inst[11:7];
+    always @(posedge cpu_clk or posedge cpu_rst) begin
+        if (cpu_rst) begin
+            id_ex_valid    <= 1'b0;
+            id_ex_pc       <= 32'h0;
+            id_ex_pc4      <= 32'h0;
+            id_ex_rs1      <= 32'h0;
+            id_ex_rs2      <= 32'h0;
+            id_ex_ext      <= 32'h0;
+            id_ex_lui_imm  <= 32'h0;
+            id_ex_rd       <= 5'h0;
+            id_ex_npc_op   <= `NPC_PC4;
+            id_ex_rf_wsel  <= `WB_ALU;
+            id_ex_alu_op   <= `ALU_ADD;
+            id_ex_alua_sel <= `ALU_A_RS1;
+            id_ex_alub_sel <= `ALU_B_RS2;
+            id_ex_ram_rop  <= `RAM_EXT_N;
+            id_ex_ram_wop  <= `RAM_WE_N;
+            id_ex_rf_we    <= 1'b0;
+        end else begin
+            id_ex_valid    <= if_id_valid;
+            id_ex_pc       <= if_id_pc;
+            id_ex_pc4      <= if_id_pc4;
+            id_ex_rs1      <= id_rf_rd1;
+            id_ex_rs2      <= id_rf_rd2;
+            id_ex_ext      <= id_ext;
+            id_ex_lui_imm  <= id_ext;
+            id_ex_rd       <= if_id_inst[11:7];
+            id_ex_npc_op   <= id_npc_op;
+            id_ex_rf_wsel  <= id_rf_wsel;
+            id_ex_alu_op   <= id_alu_op;
+            id_ex_alua_sel <= id_alua_sel;
+            id_ex_alub_sel <= id_alub_sel;
+            id_ex_ram_rop  <= id_ram_rop;
+            id_ex_ram_wop  <= id_ram_wop;
+            id_ex_rf_we    <= id_rf_we;
+        end
     end
 
     // EX stage.
-    assign alu_a = alua_sel ? pc  : rf_rd1;
-    assign alu_b = alub_sel ? ext : rf_rd2;
+    wire [31:0] alu_a;
+    wire [31:0] alu_b;
+    wire [31:0] alu_c;
+    wire        br;
+    wire        mul_div_busy;
+    wire [31:0] bj_target;
+    wire [31:0] jalr_target;
+
+    assign alu_a       = id_ex_alua_sel ? id_ex_pc  : id_ex_rs1;
+    assign alu_b       = id_ex_alub_sel ? id_ex_ext : id_ex_rs2;
+    assign bj_target   = id_ex_pc + id_ex_ext;
+    assign jalr_target = alu_c & ~32'h1;
 
     ALU U_ALU (
         .rst        (cpu_rst),
         .clk        (cpu_clk),
-        .op         (alu_op),
+        .op         (id_ex_alu_op),
         .a          (alu_a),
         .b          (alu_b),
         .br         (br),
@@ -182,35 +223,90 @@ module cpu_core(
         .busy       (mul_div_busy)
     );
 
-    // MEM stage.
-    MREQ U_MEM_REQ (
-        .ram_addr   (alu_c),
+    NPC U_NPC (
+        .op         (id_ex_npc_op),
+        .pc4        (pc4),
+        .bj_target  (bj_target),
+        .jalr_target(jalr_target),
+        .br         (br),
+        .npc        (npc)
+    );
 
-        .ram_rop    (ram_rop),
+    // EX/MEM pipeline register.
+    reg        ex_mem_valid;
+    reg [31:0] ex_mem_pc;
+    reg [31:0] ex_mem_pc4;
+    reg [31:0] ex_mem_alu_c;
+    reg [31:0] ex_mem_rs2;
+    reg [31:0] ex_mem_lui_imm;
+    reg [ 4:0] ex_mem_rd;
+    reg [ 1:0] ex_mem_rf_wsel;
+    reg [ 2:0] ex_mem_ram_rop;
+    reg [ 3:0] ex_mem_ram_wop;
+    reg        ex_mem_rf_we;
+
+    always @(posedge cpu_clk or posedge cpu_rst) begin
+        if (cpu_rst) begin
+            ex_mem_valid   <= 1'b0;
+            ex_mem_pc      <= 32'h0;
+            ex_mem_pc4     <= 32'h0;
+            ex_mem_alu_c   <= 32'h0;
+            ex_mem_rs2     <= 32'h0;
+            ex_mem_lui_imm <= 32'h0;
+            ex_mem_rd      <= 5'h0;
+            ex_mem_rf_wsel <= `WB_ALU;
+            ex_mem_ram_rop <= `RAM_EXT_N;
+            ex_mem_ram_wop <= `RAM_WE_N;
+            ex_mem_rf_we   <= 1'b0;
+        end else begin
+            ex_mem_valid   <= id_ex_valid;
+            ex_mem_pc      <= id_ex_pc;
+            ex_mem_pc4     <= id_ex_pc4;
+            ex_mem_alu_c   <= alu_c;
+            ex_mem_rs2     <= id_ex_rs2;
+            ex_mem_lui_imm <= id_ex_lui_imm;
+            ex_mem_rd      <= id_ex_rd;
+            ex_mem_rf_wsel <= id_ex_rf_wsel;
+            ex_mem_ram_rop <= id_ex_ram_rop;
+            ex_mem_ram_wop <= id_ex_ram_wop;
+            ex_mem_rf_we   <= id_ex_rf_we;
+        end
+    end
+
+    // MEM stage.
+    wire [ 3:0] da_ren;
+    wire [31:0] da_addr;
+    wire [ 3:0] da_wen;
+    wire [31:0] da_wdata;
+    wire [31:0] ram_ext;
+
+    MREQ U_MEM_REQ (
+        .ram_addr   (ex_mem_alu_c),
+
+        .ram_rop    (ex_mem_ram_rop),
         .da_ren     (da_ren),
         .da_addr    (da_addr),
 
-        .ram_wop    (ram_wop),
-        .ram_wdata  (rf_rd2),   // Store data comes from rs2.
+        .ram_wop    (ex_mem_ram_wop),
+        .ram_wdata  (ex_mem_rs2),
         .da_wen     (da_wen),
         .da_wdata   (da_wdata)
     );
 
     MEXT U_MEM_EXT (
-        .op             (ram_rop_hold),
+        .op             (ex_mem_ram_rop),
         .din            (daccess_rdata),
-        .byte_offs      (load_addr_hold[1:0]),
+        .byte_offs      (ex_mem_alu_c[1:0]),
         .ext            (ram_ext)
     );
-
-    always @(posedge cpu_clk) if (is_ld_st) load_addr_hold <= alu_c;
-    always @(posedge cpu_clk) if (is_ld_st) ram_rop_hold   <= ram_rop;
 
     // Registered external data interface.
     always @(posedge cpu_clk or posedge cpu_rst) begin
         if (cpu_rst) begin
             daccess_ren   <= 4'h0;
+            daccess_addr  <= 32'h0;
             daccess_wen   <= 4'h0;
+            daccess_wdata <= 32'h0;
         end else begin
             daccess_ren   <= da_ren;
             daccess_addr  <= da_addr;
@@ -219,34 +315,41 @@ module cpu_core(
         end
     end
 
-    assign ld_st_done = daccess_rvalid | daccess_wresp;
+    // MEM/WB pipeline register.
+    always @(posedge cpu_clk or posedge cpu_rst) begin
+        if (cpu_rst) begin
+            mem_wb_valid   <= 1'b0;
+            mem_wb_pc      <= 32'h0;
+            mem_wb_pc4     <= 32'h0;
+            mem_wb_alu_c   <= 32'h0;
+            mem_wb_ram_ext <= 32'h0;
+            mem_wb_lui_imm <= 32'h0;
+            mem_wb_rd      <= 5'h0;
+            mem_wb_rf_wsel <= `WB_ALU;
+            mem_wb_rf_we   <= 1'b0;
+        end else begin
+            mem_wb_valid   <= ex_mem_valid;
+            mem_wb_pc      <= ex_mem_pc;
+            mem_wb_pc4     <= ex_mem_pc4;
+            mem_wb_alu_c   <= ex_mem_alu_c;
+            mem_wb_ram_ext <= ram_ext;
+            mem_wb_lui_imm <= ex_mem_lui_imm;
+            mem_wb_rd      <= ex_mem_rd;
+            mem_wb_rf_wsel <= ex_mem_rf_wsel;
+            mem_wb_rf_we   <= ex_mem_rf_we;
+        end
+    end
 
     // WB stage.
-    assign rf_we_wb = ld_st_active   & daccess_rvalid |
-                      mul_div_active & !mul_div_busy  |
-                      ifetch_valid & rf_we & !is_ld_st & !is_mul_div;
-
-    assign rf_waddr = ld_st_active | mul_div_active ? rd_addr_hold : inst[11:7];
-
     always @(*) begin
-        casex ({ld_st_active, rf_wsel})
-            {1'b0, `WB_ALU}: rf_wdata = alu_c;
-            {1'b0, `WB_PC4}: rf_wdata = pc4;
-            {1'b0, `WB_EXT}: rf_wdata = ext;
-            {1'b1, 2'b??  }: rf_wdata = ram_ext;
-            default        : rf_wdata = 32'h0;
+        case (mem_wb_rf_wsel)
+            `WB_ALU : rf_wdata = mem_wb_alu_c;
+            `WB_RAM : rf_wdata = mem_wb_ram_ext;
+            `WB_PC4 : rf_wdata = mem_wb_pc4;
+            `WB_EXT : rf_wdata = mem_wb_lui_imm;
+            default : rf_wdata = 32'h0;
         endcase
     end
-
-    assign inst_finished = ld_st_active   & ld_st_done    |
-                           mul_div_active & !mul_div_busy |
-                           ifetch_valid & !is_ld_st & !is_mul_div;
-
-    always @(posedge cpu_clk or posedge cpu_rst) begin
-        inst_finished_r <= cpu_rst ? 1'b0 : inst_finished;
-    end
-
-
 
     // Trace signals for the external test harness.
 
@@ -261,12 +364,12 @@ module cpu_core(
     wire [31:0] debug_mem_waddr /* verilator public */ ;
     wire [31:0] debug_mem_wdata /* verilator public */ ;
 
-    assign debug_wb_pc    = pc;
-    assign debug_wb_rf_we = rf_we_wb;
-    assign debug_wb_rf_wR = rf_waddr;
+    assign debug_wb_pc    = mem_wb_pc;
+    assign debug_wb_rf_we = mem_wb_rf_we & mem_wb_valid;
+    assign debug_wb_rf_wR = mem_wb_rd;
     assign debug_wb_rf_wD = rf_wdata;
 
-    assign debug_mem_pc    = pc;
+    assign debug_mem_pc    = ex_mem_pc;
     assign debug_mem_we    = daccess_wen;
     assign debug_mem_waddr = daccess_addr;
     assign debug_mem_wdata = daccess_wdata;
