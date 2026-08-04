@@ -153,6 +153,24 @@ module cpu_core(
     wire        raw_b_hazard;
     wire        raw_c_hazard;
     wire        id_ex_hold;
+    wire        id_ex_load;
+    wire        id_ex_mul_div;
+    wire        ldst_done;
+    wire        ex_forward_valid;
+    wire        mem_forward_valid;
+    wire        wb_forward_valid;
+    wire        rs1_forward_ex;
+    wire        rs2_forward_ex;
+    wire        rs1_forward_mem;
+    wire        rs2_forward_mem;
+    wire        rs1_forward_wb;
+    wire        rs2_forward_wb;
+    wire [31:0] wdata_ex;
+    wire [31:0] wdata_mem;
+    wire [31:0] wdata_wb;
+    wire [31:0] ram_ext;
+    wire [31:0] id_rs1_f;
+    wire [31:0] id_rs2_f;
 
     assign id_rs1 = if_id_inst[19:15];
     assign id_rs2 = if_id_inst[24:20];
@@ -314,8 +332,8 @@ module cpu_core(
             id_ex_valid    <= if_id_valid;
             id_ex_pc       <= if_id_pc;
             id_ex_pc4      <= if_id_pc4;
-            id_ex_rs1      <= id_rf_rd1;
-            id_ex_rs2      <= id_rf_rd2;
+            id_ex_rs1      <= id_rs1_f;
+            id_ex_rs2      <= id_rs2_f;
             id_ex_ext      <= id_ext;
             id_ex_lui_imm  <= id_ext;
             id_ex_rd       <= if_id_inst[11:7];
@@ -410,7 +428,30 @@ module cpu_core(
     assign raw_a_hazard      = rs1_id_ex_hazard  | rs2_id_ex_hazard;
     assign raw_b_hazard      = rs1_id_mem_hazard | rs2_id_mem_hazard;
     assign raw_c_hazard      = rs1_id_wb_hazard  | rs2_id_wb_hazard;
-    assign raw_stop          = raw_a_hazard | raw_b_hazard | raw_c_hazard;
+    assign id_ex_load        = id_ex_valid & (id_ex_ram_rop != `RAM_EXT_N);
+    assign id_ex_mul_div     = id_ex_valid & (id_ex_is_mul | id_ex_is_div);
+    assign ex_forward_valid  = id_ex_rf_we & !id_ex_load & (!id_ex_mul_div | mul_div_done);
+    assign mem_forward_valid = ex_mem_rf_we & ((ex_mem_ram_rop == `RAM_EXT_N) | ldst_done);
+    assign wb_forward_valid  = mem_wb_rf_we;
+    assign rs1_forward_ex    = rs1_id_ex_hazard  & ex_forward_valid;
+    assign rs2_forward_ex    = rs2_id_ex_hazard  & ex_forward_valid;
+    assign rs1_forward_mem   = rs1_id_mem_hazard & mem_forward_valid;
+    assign rs2_forward_mem   = rs2_id_mem_hazard & mem_forward_valid;
+    assign rs1_forward_wb    = rs1_id_wb_hazard  & wb_forward_valid;
+    assign rs2_forward_wb    = rs2_id_wb_hazard  & wb_forward_valid;
+    assign wdata_ex          = (id_ex_rf_wsel  == `WB_PC4) ? id_ex_pc4 :
+                               (id_ex_rf_wsel  == `WB_EXT) ? id_ex_lui_imm : alu_c;
+    assign wdata_mem         = (ex_mem_rf_wsel == `WB_RAM) ? ram_ext :
+                               (ex_mem_rf_wsel == `WB_PC4) ? ex_mem_pc4 :
+                               (ex_mem_rf_wsel == `WB_EXT) ? ex_mem_lui_imm : ex_mem_alu_c;
+    assign wdata_wb          = rf_wdata;
+    assign id_rs1_f          = rs1_forward_ex  ? wdata_ex  :
+                               rs1_forward_mem ? wdata_mem :
+                               rs1_forward_wb  ? wdata_wb  : id_rf_rd1;
+    assign id_rs2_f          = rs2_forward_ex  ? wdata_ex  :
+                               rs2_forward_mem ? wdata_mem :
+                               rs2_forward_wb  ? wdata_wb  : id_rf_rd2;
+    assign raw_stop          = raw_a_hazard & id_ex_load;
     assign mul_div_stop      = id_ex_valid & (id_ex_is_mul | id_ex_is_div) & !mul_div_done;
     assign id_ex_hold        = ldst_stop | mul_div_stop;
     assign pipeline_stop     = raw_stop | ldst_stop | mul_div_stop;
@@ -472,12 +513,10 @@ module cpu_core(
     wire [31:0] da_addr;
     wire [ 3:0] da_wen;
     wire [31:0] da_wdata;
-    wire [31:0] ram_ext;
     wire        mem_is_ld;
     wire        mem_is_st;
     wire        mem_is_ld_st;
     wire        ldst_req;
-    wire        ldst_done;
     reg         ldst_suspend;
 
     assign mem_is_ld    = ex_mem_valid & (ex_mem_ram_rop != `RAM_EXT_N);
