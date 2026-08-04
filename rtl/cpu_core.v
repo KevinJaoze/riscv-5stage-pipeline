@@ -27,7 +27,12 @@ module cpu_core(
     // IF stage.
     wire [31:0] pc;
     wire [31:0] npc;
+    wire [31:0] pc_npc;
     wire [31:0] pc4;
+    wire [31:0] fetch_pc4;
+    wire        ex_bj_f;
+    wire [31:0] ex_bj_target;
+    wire        flush_pipeline;
     reg         rst_r;
     reg  [31:0] if_pc;
     reg  [31:0] if_pc4;
@@ -38,14 +43,16 @@ module cpu_core(
         rst_r <= cpu_rst;
     end
 
-    assign ifetch_req  = first_req | ifetch_valid;
-    assign ifetch_addr = pc;
+    assign ifetch_req  = first_req | ifetch_valid | ex_bj_f;
+    assign ifetch_addr = ex_bj_f ? ex_bj_target : pc;
     assign pc4         = pc + 32'h4;
+    assign fetch_pc4   = ifetch_addr + 32'h4;
+    assign pc_npc      = ex_bj_f ? fetch_pc4 : npc;
 
     PC U_PC (
         .clk        (cpu_clk),
         .rst        (cpu_rst),
-        .npc        (npc),
+        .npc        (pc_npc),
         .fetch      (ifetch_req),
         .pc         (pc)
     );
@@ -55,8 +62,8 @@ module cpu_core(
             if_pc  <= 32'h0;
             if_pc4 <= 32'h0;
         end else if (ifetch_req) begin
-            if_pc  <= pc;
-            if_pc4 <= pc4;
+            if_pc  <= ifetch_addr;
+            if_pc4 <= fetch_pc4;
         end
     end
 
@@ -68,6 +75,11 @@ module cpu_core(
 
     always @(posedge cpu_clk or posedge cpu_rst) begin
         if (cpu_rst) begin
+            if_id_valid <= 1'b0;
+            if_id_pc    <= 32'h0;
+            if_id_pc4   <= 32'h0;
+            if_id_inst  <= NOP_INST;
+        end else if (flush_pipeline) begin
             if_id_valid <= 1'b0;
             if_id_pc    <= 32'h0;
             if_id_pc4   <= 32'h0;
@@ -95,6 +107,33 @@ module cpu_core(
     wire [31:0] id_rf_rd1;
     wire [31:0] id_rf_rd2;
     wire [31:0] id_ext;
+    wire [ 4:0] id_rs1;
+    wire [ 4:0] id_rs2;
+    wire [ 4:0] id_rd;
+    wire        id_rf1;
+    wire        id_rf2;
+    wire        rs1_id_ex_hazard;
+    wire        rs2_id_ex_hazard;
+    wire        rs1_id_mem_hazard;
+    wire        rs2_id_mem_hazard;
+    wire        rs1_id_wb_hazard;
+    wire        rs2_id_wb_hazard;
+    wire        raw_a_hazard;
+    wire        raw_b_hazard;
+    wire        raw_c_hazard;
+
+    assign id_rs1 = if_id_inst[19:15];
+    assign id_rs2 = if_id_inst[24:20];
+    assign id_rd  = if_id_inst[11:7];
+    assign id_rf1 = (if_id_inst[6:0] == 7'b0110011) |
+                    (if_id_inst[6:0] == 7'b0010011) |
+                    (if_id_inst[6:0] == 7'b0000011) |
+                    (if_id_inst[6:0] == 7'b0100011) |
+                    (if_id_inst[6:0] == 7'b1100011) |
+                    (if_id_inst[6:0] == 7'b1100111);
+    assign id_rf2 = (if_id_inst[6:0] == 7'b0110011) |
+                    (if_id_inst[6:0] == 7'b0100011) |
+                    (if_id_inst[6:0] == 7'b1100011);
 
     // WB-stage signals feed the register file write port.
     reg [31:0] mem_wb_pc;
@@ -178,6 +217,23 @@ module cpu_core(
             id_ex_ram_rop  <= `RAM_EXT_N;
             id_ex_ram_wop  <= `RAM_WE_N;
             id_ex_rf_we    <= 1'b0;
+        end else if (flush_pipeline) begin
+            id_ex_valid    <= 1'b0;
+            id_ex_pc       <= 32'h0;
+            id_ex_pc4      <= 32'h0;
+            id_ex_rs1      <= 32'h0;
+            id_ex_rs2      <= 32'h0;
+            id_ex_ext      <= 32'h0;
+            id_ex_lui_imm  <= 32'h0;
+            id_ex_rd       <= 5'h0;
+            id_ex_npc_op   <= `NPC_PC4;
+            id_ex_rf_wsel  <= `WB_ALU;
+            id_ex_alu_op   <= `ALU_ADD;
+            id_ex_alua_sel <= `ALU_A_RS1;
+            id_ex_alub_sel <= `ALU_B_RS2;
+            id_ex_ram_rop  <= `RAM_EXT_N;
+            id_ex_ram_wop  <= `RAM_WE_N;
+            id_ex_rf_we    <= 1'b0;
         end else begin
             id_ex_valid    <= if_id_valid;
             id_ex_pc       <= if_id_pc;
@@ -211,6 +267,11 @@ module cpu_core(
     assign alu_b       = id_ex_alub_sel ? id_ex_ext : id_ex_rs2;
     assign bj_target   = id_ex_pc + id_ex_ext;
     assign jalr_target = alu_c & ~32'h1;
+    assign ex_bj_f     = id_ex_valid & (((id_ex_npc_op == `NPC_BRA) & br) |
+                                         (id_ex_npc_op == `NPC_JMP) |
+                                         (id_ex_npc_op == `NPC_JALR));
+    assign ex_bj_target = (id_ex_npc_op == `NPC_JALR) ? jalr_target : bj_target;
+    assign flush_pipeline = ex_bj_f;
 
     ALU U_ALU (
         .rst        (cpu_rst),
@@ -244,6 +305,16 @@ module cpu_core(
     reg [ 2:0] ex_mem_ram_rop;
     reg [ 3:0] ex_mem_ram_wop;
     reg        ex_mem_rf_we;
+
+    assign rs1_id_ex_hazard  = (id_ex_rd  == id_rs1) & id_ex_rf_we  & id_rf1 & (id_ex_rd  != 5'h0) & id_ex_valid;
+    assign rs2_id_ex_hazard  = (id_ex_rd  == id_rs2) & id_ex_rf_we  & id_rf2 & (id_ex_rd  != 5'h0) & id_ex_valid;
+    assign rs1_id_mem_hazard = (ex_mem_rd == id_rs1) & ex_mem_rf_we & id_rf1 & (ex_mem_rd != 5'h0) & ex_mem_valid;
+    assign rs2_id_mem_hazard = (ex_mem_rd == id_rs2) & ex_mem_rf_we & id_rf2 & (ex_mem_rd != 5'h0) & ex_mem_valid;
+    assign rs1_id_wb_hazard  = (mem_wb_rd == id_rs1) & mem_wb_rf_we & id_rf1 & (mem_wb_rd != 5'h0) & mem_wb_valid;
+    assign rs2_id_wb_hazard  = (mem_wb_rd == id_rs2) & mem_wb_rf_we & id_rf2 & (mem_wb_rd != 5'h0) & mem_wb_valid;
+    assign raw_a_hazard      = rs1_id_ex_hazard  | rs2_id_ex_hazard;
+    assign raw_b_hazard      = rs1_id_mem_hazard | rs2_id_mem_hazard;
+    assign raw_c_hazard      = rs1_id_wb_hazard  | rs2_id_wb_hazard;
 
     always @(posedge cpu_clk or posedge cpu_rst) begin
         if (cpu_rst) begin
