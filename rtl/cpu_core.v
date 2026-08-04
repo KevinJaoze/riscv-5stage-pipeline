@@ -366,9 +366,9 @@ module cpu_core(
     assign alu_b       = id_ex_alub_sel ? id_ex_ext : id_ex_rs2;
     assign bj_target   = id_ex_pc + id_ex_ext;
     assign jalr_target = alu_c & ~32'h1;
-    assign ex_bj_f     = id_ex_valid & (((id_ex_npc_op == `NPC_BRA) & br) |
-                                         (id_ex_npc_op == `NPC_JMP) |
-                                         (id_ex_npc_op == `NPC_JALR));
+    assign ex_bj_f     = !ldst_stop & id_ex_valid & (((id_ex_npc_op == `NPC_BRA) & br) |
+                                                      (id_ex_npc_op == `NPC_JMP) |
+                                                      (id_ex_npc_op == `NPC_JALR));
     assign ex_bj_target = (id_ex_npc_op == `NPC_JALR) ? jalr_target : bj_target;
     assign flush_pipeline = ex_bj_f;
     assign mul_div_done = mul_div_suspend & !mul_div_busy;
