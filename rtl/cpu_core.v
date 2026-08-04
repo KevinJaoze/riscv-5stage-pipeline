@@ -33,9 +33,14 @@ module cpu_core(
     wire        ex_bj_f;
     wire [31:0] ex_bj_target;
     wire        flush_pipeline;
+    wire        pipeline_stop;
+    wire        pause_ifetch;
+    wire        refetch_if;
     reg         rst_r;
     reg  [31:0] if_pc;
     reg  [31:0] if_pc4;
+    reg         refetch_valid;
+    reg  [31:0] refetch_pc;
 
     wire first_req = rst_r & !cpu_rst;
 
@@ -43,11 +48,14 @@ module cpu_core(
         rst_r <= cpu_rst;
     end
 
-    assign ifetch_req  = first_req | ifetch_valid | ex_bj_f;
-    assign ifetch_addr = ex_bj_f ? ex_bj_target : pc;
+    assign pause_ifetch  = pipeline_stop;
+    assign refetch_if    = refetch_valid & !pause_ifetch;
+    assign ifetch_req    = ex_bj_f | (!pause_ifetch & (first_req | ifetch_valid | refetch_if));
+    assign ifetch_addr   = ex_bj_f ? ex_bj_target :
+                           refetch_if ? refetch_pc : pc;
     assign pc4         = pc + 32'h4;
     assign fetch_pc4   = ifetch_addr + 32'h4;
-    assign pc_npc      = ex_bj_f ? fetch_pc4 : npc;
+    assign pc_npc      = (ex_bj_f | refetch_if) ? fetch_pc4 : npc;
 
     PC U_PC (
         .clk        (cpu_clk),
@@ -64,6 +72,21 @@ module cpu_core(
         end else if (ifetch_req) begin
             if_pc  <= ifetch_addr;
             if_pc4 <= fetch_pc4;
+        end
+    end
+
+    always @(posedge cpu_clk or posedge cpu_rst) begin
+        if (cpu_rst) begin
+            refetch_valid <= 1'b0;
+            refetch_pc    <= 32'h0;
+        end else if (flush_pipeline) begin
+            refetch_valid <= 1'b0;
+            refetch_pc    <= 32'h0;
+        end else if (pipeline_stop & ifetch_valid) begin
+            refetch_valid <= 1'b1;
+            refetch_pc    <= if_pc;
+        end else if (refetch_if & ifetch_req) begin
+            refetch_valid <= 1'b0;
         end
     end
 
@@ -84,6 +107,11 @@ module cpu_core(
             if_id_pc    <= 32'h0;
             if_id_pc4   <= 32'h0;
             if_id_inst  <= NOP_INST;
+        end else if (pipeline_stop) begin
+            if_id_valid <= if_id_valid;
+            if_id_pc    <= if_id_pc;
+            if_id_pc4   <= if_id_pc4;
+            if_id_inst  <= if_id_inst;
         end else begin
             if_id_valid <= ifetch_valid;
             if_id_pc    <= if_pc;
@@ -234,6 +262,23 @@ module cpu_core(
             id_ex_ram_rop  <= `RAM_EXT_N;
             id_ex_ram_wop  <= `RAM_WE_N;
             id_ex_rf_we    <= 1'b0;
+        end else if (pipeline_stop) begin
+            id_ex_valid    <= 1'b0;
+            id_ex_pc       <= 32'h0;
+            id_ex_pc4      <= 32'h0;
+            id_ex_rs1      <= 32'h0;
+            id_ex_rs2      <= 32'h0;
+            id_ex_ext      <= 32'h0;
+            id_ex_lui_imm  <= 32'h0;
+            id_ex_rd       <= 5'h0;
+            id_ex_npc_op   <= `NPC_PC4;
+            id_ex_rf_wsel  <= `WB_ALU;
+            id_ex_alu_op   <= `ALU_ADD;
+            id_ex_alua_sel <= `ALU_A_RS1;
+            id_ex_alub_sel <= `ALU_B_RS2;
+            id_ex_ram_rop  <= `RAM_EXT_N;
+            id_ex_ram_wop  <= `RAM_WE_N;
+            id_ex_rf_we    <= 1'b0;
         end else begin
             id_ex_valid    <= if_id_valid;
             id_ex_pc       <= if_id_pc;
@@ -315,6 +360,7 @@ module cpu_core(
     assign raw_a_hazard      = rs1_id_ex_hazard  | rs2_id_ex_hazard;
     assign raw_b_hazard      = rs1_id_mem_hazard | rs2_id_mem_hazard;
     assign raw_c_hazard      = rs1_id_wb_hazard  | rs2_id_wb_hazard;
+    assign pipeline_stop     = raw_a_hazard | raw_b_hazard | raw_c_hazard;
 
     always @(posedge cpu_clk or posedge cpu_rst) begin
         if (cpu_rst) begin
