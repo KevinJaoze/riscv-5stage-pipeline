@@ -23,6 +23,10 @@ module cpu_core(
 );
 
     localparam [31:0] NOP_INST = 32'h0000_0013; // addi x0, x0, 0
+    localparam [ 1:0] RD_SEL_RF  = 2'b00;
+    localparam [ 1:0] RD_SEL_EX  = 2'b01;
+    localparam [ 1:0] RD_SEL_MEM = 2'b10;
+    localparam [ 1:0] RD_SEL_WB  = 2'b11;
 
     // IF stage.
     wire [31:0] pc;
@@ -33,11 +37,10 @@ module cpu_core(
     wire        ex_bj_f;
     wire [31:0] ex_bj_target;
     wire        flush_pipeline;
-    wire        pipeline_stop;
-    wire        raw_stop;
-    wire        ldst_stop;
-    wire        mul_div_stop;
-    wire        pause_ifetch;
+    wire        pipeline_stall;
+    wire        raw_stall;
+    wire        ldst_stall;
+    wire        mul_div_stall;
     wire        refetch_if;
     reg         rst_r;
     reg  [31:0] if_pc;
@@ -51,9 +54,8 @@ module cpu_core(
         rst_r <= cpu_rst;
     end
 
-    assign pause_ifetch  = pipeline_stop;
-    assign refetch_if    = refetch_valid & !pause_ifetch;
-    assign ifetch_req    = ex_bj_f | (!pause_ifetch & (first_req | ifetch_valid | refetch_if));
+    assign refetch_if    = refetch_valid & !pipeline_stall;
+    assign ifetch_req    = ex_bj_f | (!pipeline_stall & (first_req | ifetch_valid | refetch_if));
     assign ifetch_addr   = ex_bj_f ? ex_bj_target :
                            refetch_if ? refetch_pc : pc;
     assign pc4         = pc + 32'h4;
@@ -85,7 +87,7 @@ module cpu_core(
         end else if (flush_pipeline) begin
             refetch_valid <= 1'b0;
             refetch_pc    <= 32'h0;
-        end else if (pipeline_stop & ifetch_valid) begin
+        end else if (pipeline_stall & ifetch_valid) begin
             refetch_valid <= 1'b1;
             refetch_pc    <= if_pc;
         end else if (refetch_if & ifetch_req) begin
@@ -110,7 +112,7 @@ module cpu_core(
             if_id_pc    <= 32'h0;
             if_id_pc4   <= 32'h0;
             if_id_inst  <= NOP_INST;
-        end else if (pipeline_stop) begin
+        end else if (pipeline_stall) begin
             if_id_valid <= if_id_valid;
             if_id_pc    <= if_id_pc;
             if_id_pc4   <= if_id_pc4;
@@ -140,41 +142,21 @@ module cpu_core(
     wire [31:0] id_ext;
     wire [ 4:0] id_rs1;
     wire [ 4:0] id_rs2;
-    wire [ 4:0] id_rd;
     wire        id_rf1;
     wire        id_rf2;
-    wire        rs1_id_ex_hazard;
-    wire        rs2_id_ex_hazard;
-    wire        rs1_id_mem_hazard;
-    wire        rs2_id_mem_hazard;
-    wire        rs1_id_wb_hazard;
-    wire        rs2_id_wb_hazard;
-    wire        raw_a_hazard;
-    wire        raw_b_hazard;
-    wire        raw_c_hazard;
     wire        id_ex_hold;
-    wire        id_ex_load;
-    wire        id_ex_mul_div;
     wire        ldst_done;
-    wire        ex_forward_valid;
-    wire        mem_forward_valid;
-    wire        wb_forward_valid;
-    wire        rs1_forward_ex;
-    wire        rs2_forward_ex;
-    wire        rs1_forward_mem;
-    wire        rs2_forward_mem;
-    wire        rs1_forward_wb;
-    wire        rs2_forward_wb;
+    wire [31:0] ram_ext;
+    wire [ 1:0] rd1_sel;
+    wire [ 1:0] rd2_sel;
     wire [31:0] wdata_ex;
     wire [31:0] wdata_mem;
     wire [31:0] wdata_wb;
-    wire [31:0] ram_ext;
     wire [31:0] id_rs1_f;
     wire [31:0] id_rs2_f;
 
     assign id_rs1 = if_id_inst[19:15];
     assign id_rs2 = if_id_inst[24:20];
-    assign id_rd  = if_id_inst[11:7];
     assign id_rf1 = (if_id_inst[6:0] == 7'b0110011) |
                     (if_id_inst[6:0] == 7'b0010011) |
                     (if_id_inst[6:0] == 7'b0000011) |
@@ -309,7 +291,7 @@ module cpu_core(
             id_ex_rf_we    <= id_ex_rf_we;
             id_ex_is_mul   <= id_ex_is_mul;
             id_ex_is_div   <= id_ex_is_div;
-        end else if (raw_stop) begin
+        end else if (raw_stall) begin
             id_ex_valid    <= 1'b0;
             id_ex_pc       <= 32'h0;
             id_ex_pc4      <= 32'h0;
@@ -366,9 +348,9 @@ module cpu_core(
     assign alu_b       = id_ex_alub_sel ? id_ex_ext : id_ex_rs2;
     assign bj_target   = id_ex_pc + id_ex_ext;
     assign jalr_target = alu_c & ~32'h1;
-    assign ex_bj_f     = !ldst_stop & id_ex_valid & (((id_ex_npc_op == `NPC_BRA) & br) |
-                                                      (id_ex_npc_op == `NPC_JMP) |
-                                                      (id_ex_npc_op == `NPC_JALR));
+    assign ex_bj_f     = !ldst_stall & id_ex_valid & (((id_ex_npc_op == `NPC_BRA) & br) |
+                                                       (id_ex_npc_op == `NPC_JMP) |
+                                                       (id_ex_npc_op == `NPC_JALR));
     assign ex_bj_target = (id_ex_npc_op == `NPC_JALR) ? jalr_target : bj_target;
     assign flush_pipeline = ex_bj_f;
     assign mul_div_done = mul_div_suspend & !mul_div_busy;
@@ -419,42 +401,53 @@ module cpu_core(
     reg [ 3:0] ex_mem_ram_wop;
     reg        ex_mem_rf_we;
 
-    assign rs1_id_ex_hazard  = (id_ex_rd  == id_rs1) & id_ex_rf_we  & id_rf1 & (id_ex_rd  != 5'h0) & id_ex_valid;
-    assign rs2_id_ex_hazard  = (id_ex_rd  == id_rs2) & id_ex_rf_we  & id_rf2 & (id_ex_rd  != 5'h0) & id_ex_valid;
-    assign rs1_id_mem_hazard = (ex_mem_rd == id_rs1) & ex_mem_rf_we & id_rf1 & (ex_mem_rd != 5'h0) & ex_mem_valid;
-    assign rs2_id_mem_hazard = (ex_mem_rd == id_rs2) & ex_mem_rf_we & id_rf2 & (ex_mem_rd != 5'h0) & ex_mem_valid;
-    assign rs1_id_wb_hazard  = (mem_wb_rd == id_rs1) & mem_wb_rf_we & id_rf1 & (mem_wb_rd != 5'h0) & mem_wb_valid;
-    assign rs2_id_wb_hazard  = (mem_wb_rd == id_rs2) & mem_wb_rf_we & id_rf2 & (mem_wb_rd != 5'h0) & mem_wb_valid;
-    assign raw_a_hazard      = rs1_id_ex_hazard  | rs2_id_ex_hazard;
-    assign raw_b_hazard      = rs1_id_mem_hazard | rs2_id_mem_hazard;
-    assign raw_c_hazard      = rs1_id_wb_hazard  | rs2_id_wb_hazard;
-    assign id_ex_load        = id_ex_valid & (id_ex_ram_rop != `RAM_EXT_N);
-    assign id_ex_mul_div     = id_ex_valid & (id_ex_is_mul | id_ex_is_div);
-    assign ex_forward_valid  = id_ex_rf_we & !id_ex_load & (!id_ex_mul_div | mul_div_done);
-    assign mem_forward_valid = ex_mem_rf_we & ((ex_mem_ram_rop == `RAM_EXT_N) | ldst_done);
-    assign wb_forward_valid  = mem_wb_rf_we;
-    assign rs1_forward_ex    = rs1_id_ex_hazard  & ex_forward_valid;
-    assign rs2_forward_ex    = rs2_id_ex_hazard  & ex_forward_valid;
-    assign rs1_forward_mem   = rs1_id_mem_hazard & mem_forward_valid;
-    assign rs2_forward_mem   = rs2_id_mem_hazard & mem_forward_valid;
-    assign rs1_forward_wb    = rs1_id_wb_hazard  & wb_forward_valid;
-    assign rs2_forward_wb    = rs2_id_wb_hazard  & wb_forward_valid;
+    assign id_ex_hold        = ldst_stall | mul_div_stall;
+
     assign wdata_ex          = (id_ex_rf_wsel  == `WB_PC4) ? id_ex_pc4 :
                                (id_ex_rf_wsel  == `WB_EXT) ? id_ex_lui_imm : alu_c;
     assign wdata_mem         = (ex_mem_rf_wsel == `WB_RAM) ? ram_ext :
                                (ex_mem_rf_wsel == `WB_PC4) ? ex_mem_pc4 :
                                (ex_mem_rf_wsel == `WB_EXT) ? ex_mem_lui_imm : ex_mem_alu_c;
     assign wdata_wb          = rf_wdata;
-    assign id_rs1_f          = rs1_forward_ex  ? wdata_ex  :
-                               rs1_forward_mem ? wdata_mem :
-                               rs1_forward_wb  ? wdata_wb  : id_rf_rd1;
-    assign id_rs2_f          = rs2_forward_ex  ? wdata_ex  :
-                               rs2_forward_mem ? wdata_mem :
-                               rs2_forward_wb  ? wdata_wb  : id_rf_rd2;
-    assign raw_stop          = raw_a_hazard & id_ex_load;
-    assign mul_div_stop      = id_ex_valid & (id_ex_is_mul | id_ex_is_div) & !mul_div_done;
-    assign id_ex_hold        = ldst_stop | mul_div_stop;
-    assign pipeline_stop     = raw_stop | ldst_stop | mul_div_stop;
+    assign id_rs1_f          = (rd1_sel == RD_SEL_EX)  ? wdata_ex  :
+                               (rd1_sel == RD_SEL_MEM) ? wdata_mem :
+                               (rd1_sel == RD_SEL_WB)  ? wdata_wb  : id_rf_rd1;
+    assign id_rs2_f          = (rd2_sel == RD_SEL_EX)  ? wdata_ex  :
+                               (rd2_sel == RD_SEL_MEM) ? wdata_mem :
+                               (rd2_sel == RD_SEL_WB)  ? wdata_wb  : id_rf_rd2;
+
+    HazardUnit U_HAZARD (
+        .id_rs1         (id_rs1),
+        .id_rs2         (id_rs2),
+        .id_rf1         (id_rf1),
+        .id_rf2         (id_rf2),
+
+        .id_ex_valid    (id_ex_valid),
+        .id_ex_rd       (id_ex_rd),
+        .id_ex_rf_we    (id_ex_rf_we),
+        .id_ex_ram_rop  (id_ex_ram_rop),
+        .id_ex_is_mul   (id_ex_is_mul),
+        .id_ex_is_div   (id_ex_is_div),
+        .mul_div_done   (mul_div_done),
+
+        .ex_mem_valid   (ex_mem_valid),
+        .ex_mem_rd      (ex_mem_rd),
+        .ex_mem_rf_we   (ex_mem_rf_we),
+        .ex_mem_ram_rop (ex_mem_ram_rop),
+        .ex_mem_ram_wop (ex_mem_ram_wop),
+        .ldst_done      (ldst_done),
+
+        .mem_wb_valid   (mem_wb_valid),
+        .mem_wb_rd      (mem_wb_rd),
+        .mem_wb_rf_we   (mem_wb_rf_we),
+
+        .raw_stall      (raw_stall),
+        .ldst_stall     (ldst_stall),
+        .mul_div_stall  (mul_div_stall),
+        .pipeline_stall (pipeline_stall),
+        .rd1_sel        (rd1_sel),
+        .rd2_sel        (rd2_sel)
+    );
 
     always @(posedge cpu_clk or posedge cpu_rst) begin
         if (cpu_rst) begin
@@ -469,7 +462,7 @@ module cpu_core(
             ex_mem_ram_rop <= `RAM_EXT_N;
             ex_mem_ram_wop <= `RAM_WE_N;
             ex_mem_rf_we   <= 1'b0;
-        end else if (ldst_stop) begin
+        end else if (ldst_stall) begin
             ex_mem_valid   <= ex_mem_valid;
             ex_mem_pc      <= ex_mem_pc;
             ex_mem_pc4     <= ex_mem_pc4;
@@ -481,7 +474,7 @@ module cpu_core(
             ex_mem_ram_rop <= ex_mem_ram_rop;
             ex_mem_ram_wop <= ex_mem_ram_wop;
             ex_mem_rf_we   <= ex_mem_rf_we;
-        end else if (mul_div_stop) begin
+        end else if (mul_div_stall) begin
             ex_mem_valid   <= 1'b0;
             ex_mem_pc      <= 32'h0;
             ex_mem_pc4     <= 32'h0;
@@ -515,16 +508,13 @@ module cpu_core(
     wire [31:0] da_wdata;
     wire        mem_is_ld;
     wire        mem_is_st;
-    wire        mem_is_ld_st;
     wire        ldst_req;
     reg         ldst_suspend;
 
     assign mem_is_ld    = ex_mem_valid & (ex_mem_ram_rop != `RAM_EXT_N);
     assign mem_is_st    = ex_mem_valid & (ex_mem_ram_wop != `RAM_WE_N);
-    assign mem_is_ld_st = mem_is_ld | mem_is_st;
-    assign ldst_req     = mem_is_ld_st & !ldst_suspend;
+    assign ldst_req     = (mem_is_ld | mem_is_st) & !ldst_suspend;
     assign ldst_done    = (mem_is_ld & daccess_rvalid) | (mem_is_st & daccess_wresp);
-    assign ldst_stop    = mem_is_ld_st & !ldst_done;
 
     MREQ U_MEM_REQ (
         .ram_addr   (ex_mem_alu_c),
@@ -583,7 +573,7 @@ module cpu_core(
             mem_wb_rd      <= 5'h0;
             mem_wb_rf_wsel <= `WB_ALU;
             mem_wb_rf_we   <= 1'b0;
-        end else if (ldst_stop) begin
+        end else if (ldst_stall) begin
             mem_wb_valid   <= 1'b0;
             mem_wb_pc      <= 32'h0;
             mem_wb_pc4     <= 32'h0;
